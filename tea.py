@@ -287,8 +287,6 @@ class TeaUser(TeaUser):
         return user
 
 
-# ================== /tea ==================
-
 @bot.message_handler(commands=['tea'])
 def handle_tea(message):
     db.add_chat(message.chat.id)
@@ -298,6 +296,10 @@ def handle_tea(message):
         message.from_user.username,
         message.from_user.first_name
     )
+
+    # 🔧 фикс для старых пользователей
+    if not hasattr(user, "chats"):
+        user.chats = set()
 
     user.chats.add(message.chat.id)
 
@@ -311,7 +313,7 @@ def handle_tea(message):
         left = int(3600 - (now - user.last_tea_time))
         text = (
             f"⏳ {get_user_mention(user.user_id, user.username, user.first_name)}\n"
-            f"☕ Чай можно пить **раз в час**\n"
+            f"☕ Чай можно пить раз в час\n"
             f"🕒 Осталось: {format_time_remaining(left)}"
         )
         bot.send_message(message.chat.id, text)
@@ -360,14 +362,8 @@ def handle_top_tea(message):
     for i, u in enumerate(top, 1):
         text += f"{i}. {get_user_mention(u.user_id, u.username, u.first_name)} — 🍵 {u.tea_count}\n"
 
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton(
-        "🏠 Топ этого чата",
-        callback_data=f"chat_top:{message.chat.id}"
-    ))
-
-    bot.send_message(message.chat.id, text, reply_markup=kb)
-
+    # Отправляем сообщение без кнопки
+    bot.send_message(message.chat.id, text)
 
 # ================== CALLBACK: TOP ЧАТА ==================
 
@@ -402,13 +398,17 @@ def show_chat_top(call):
 def back_global_top(call):
     top = db.get_top_users(20)
 
+    if not top:
+        bot.answer_callback_query(call.id, "☕ Пока нет данных")
+        return
+
     text = "🏆 ТОП 20 ПО ЧАЮ\n\n"
     for i, u in enumerate(top, 1):
         text += f"{i}. {get_user_mention(u.user_id, u.username, u.first_name)} — 🍵 {u.tea_count}\n"
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton(
-        "🏠 Топ чата",
+        "🏠 Топ этого чата",
         callback_data=f"chat_top:{call.message.chat.id}"
     ))
 
@@ -418,6 +418,37 @@ def back_global_top(call):
         call.message.message_id,
         reply_markup=kb
     )
+
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("chat_top:"))
+def show_chat_top(call):
+    chat_id = int(call.data.split(":")[1])
+    top = db.get_top_chat_users(chat_id, 20)
+
+    if not top:
+        bot.answer_callback_query(call.id, "☕ В этом чате ещё никто не пил чай")
+        return
+
+    text = "🏠 ТОП ЭТОГО ЧАТА\n\n"
+    for i, u in enumerate(top, 1):
+        text += f"{i}. {get_user_mention(u.user_id, u.username, u.first_name)} — 🍵 {u.tea_count}\n"
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton(
+        "⬅️ Назад",
+        callback_data="back_global_top"
+    ))
+
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb
+    )
+
+    bot.answer_callback_query(call.id)
 
 # ================== ОБРАБОТКА ТЕКСТА И РП КОМАНД ==================
 
