@@ -229,294 +229,386 @@ def handle_help(message):
         parse_mode='HTML'
     )
 
+# ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
+
+def get_user_mention(user_id: int, username: str, first_name: str) -> str:
+    return f"@{username}" if username else first_name
+
+
+def format_time_remaining(seconds: int) -> str:
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h}ч {m}м"
+    if m > 0:
+        return f"{m}м {s}с"
+    return f"{s}с"
+
+
+# ================== DATABASE FIX ==================
+
+class Database(Database):
+
+    def get_top_users(self, limit: int = 20):
+        users = [u for u in self.users.values() if u.tea_count > 0]
+        users.sort(key=lambda u: u.tea_count, reverse=True)
+        return users[:limit]
+
+    def get_top_chat_users(self, chat_id: int, limit: int = 20):
+        users = [
+            u for u in self.users.values()
+            if u.tea_count > 0 and chat_id in getattr(u, "chats", set())
+        ]
+        users.sort(key=lambda u: u.tea_count, reverse=True)
+        return users[:limit]
+
+
+# ================== ДОБАВЛЯЕМ УЧЁТ ЧАТОВ У ЮЗЕРА ==================
+
+class TeaUser(TeaUser):
+    def __init__(self, user_id, username, first_name):
+        super().__init__(user_id, username, first_name)
+        self.chats = set()
+
+    def to_dict(self):
+        data = super().to_dict()
+        data["chats"] = list(self.chats)
+        return data
+
+    @classmethod
+    def from_dict(cls, data):
+        user = cls(data["user_id"], data["username"], data["first_name"])
+        user.tea_count = data["tea_count"]
+        user.last_tea_time = data["last_tea_time"]
+        user.blocked = data.get("blocked", False)
+        user.block_reason = data.get("block_reason", "")
+        user.chats = set(data.get("chats", []))
+        return user
+
+
+# ================== /tea ==================
+
 @bot.message_handler(commands=['tea'])
 def handle_tea(message):
     db.add_chat(message.chat.id)
-    
+
     user = db.get_or_create_user(
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name
     )
-    
+
+    user.chats.add(message.chat.id)
+
     if user.blocked:
         send_blocked_message(message, user)
         return
-    
-    current_time = time.time()
-    
-    if user.last_tea_time:
-        time_passed = current_time - user.last_tea_time
-        if time_passed < 3600:  # 1 час
-            time_remaining = 3600 - time_passed
-            mention = get_user_mention(
-                message.from_user.id,
-                message.from_user.username,
-                message.from_user.first_name
-            )
-            
-            text = f"❗{mention}, пить чай можно 1 раз в час, попробуй через: {format_time_remaining(int(time_remaining))}"
-            bot.send_message(message.chat.id, text, parse_mode='HTML')
-            return
-    
-    # Пользователь может пить чай
+
+    now = time.time()
+
+    if user.last_tea_time and now - user.last_tea_time < 3600:
+        left = int(3600 - (now - user.last_tea_time))
+        text = (
+            f"⏳ {get_user_mention(user.user_id, user.username, user.first_name)}\n"
+            f"☕ Чай можно пить **раз в час**\n"
+            f"🕒 Осталось: {format_time_remaining(left)}"
+        )
+        bot.send_message(message.chat.id, text)
+        return
+
     user.tea_count += 1
-    user.last_tea_time = current_time
+    user.last_tea_time = now
     db.save_data()
-    
-    mention = get_user_mention(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name
+
+    text = (
+        f"🍵 {get_user_mention(user.user_id, user.username, user.first_name)}\n"
+        f"➕ +1 чашка чая\n"
+        f"📊 Всего: {user.tea_count}"
     )
-    
-    text = f"🍵{mention}, ты попил чашечку чая. Всего выпил: {user.tea_count}"
-    bot.send_message(message.chat.id, text, parse_mode='HTML')
+    bot.send_message(message.chat.id, text)
+
+
+# ================== /my_tea ==================
 
 @bot.message_handler(commands=['my_tea'])
 def handle_my_tea(message):
-    db.add_chat(message.chat.id)
-    
     user = db.get_or_create_user(
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name
     )
-    
-    if user.blocked:
-        send_blocked_message(message, user)
-        return
-    
-    mention = get_user_mention(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name
+
+    text = (
+        f"🍵 {get_user_mention(user.user_id, user.username, user.first_name)}\n"
+        f"📊 Ты выпил чашек: {user.tea_count}"
     )
-    
-    text = f"🍵{mention}, всего ты выпил чашек - {user.tea_count}"
-    bot.send_message(message.chat.id, text, parse_mode='HTML')
+    bot.send_message(message.chat.id, text)
+
+
+# ================== /top_tea ==================
 
 @bot.message_handler(commands=['top_tea'])
 def handle_top_tea(message):
-    db.add_chat(message.chat.id)
-    
-    user = db.get_or_create_user(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name
-    )
-    
-    if user.blocked:
-        send_blocked_message(message, user)
+    top = db.get_top_users(20)
+
+    if not top:
+        bot.send_message(message.chat.id, "😴 Пока никто не пил чай")
         return
-    
-    # Получаем топ всех пользователей
-    top_users = db.get_top_users(20)
-    
-    text = "<b>🏆 Топ 20:</b>\n\n"
-    for i, top_user in enumerate(top_users, 1):
-        mention = get_user_mention(
-            top_user.user_id,
-            top_user.username,
-            top_user.first_name
-        )
-        text += f"{i}. {mention} - 🧉выпито чашек ({top_user.tea_count})\n"
-    
-    keyboard = types.InlineKeyboardMarkup()
-    keyboard.add(types.InlineKeyboardButton(
-        "Топ чата", 
+
+    text = "🏆 ТОП 20 ПО ЧАЮ\n\n"
+    for i, u in enumerate(top, 1):
+        text += f"{i}. {get_user_mention(u.user_id, u.username, u.first_name)} — 🍵 {u.tea_count}\n"
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton(
+        "🏠 Топ этого чата",
         callback_data=f"chat_top:{message.chat.id}"
     ))
-    
-    bot.send_message(
-        message.chat.id,
+
+    bot.send_message(message.chat.id, text, reply_markup=kb)
+
+
+# ================== CALLBACK: TOP ЧАТА ==================
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("chat_top:"))
+def show_chat_top(call):
+    chat_id = int(call.data.split(":")[1])
+    top = db.get_top_chat_users(chat_id, 20)
+
+    if not top:
+        bot.answer_callback_query(call.id, "В этом чате ещё никто не пил чай ☕")
+        return
+
+    text = "🏠 ТОП ЧАТА\n\n"
+    for i, u in enumerate(top, 1):
+        text += f"{i}. {get_user_mention(u.user_id, u.username, u.first_name)} — 🍵 {u.tea_count}\n"
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton(
+        "🌍 Общий топ",
+        callback_data="back_global_top"
+    ))
+
+    bot.edit_message_text(
         text,
-        parse_mode='HTML',
-        reply_markup=keyboard
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb
     )
 
-# Обработка РП команд и текстовых сообщений
+
+@bot.callback_query_handler(func=lambda c: c.data == "back_global_top")
+def back_global_top(call):
+    top = db.get_top_users(20)
+
+    text = "🏆 ТОП 20 ПО ЧАЮ\n\n"
+    for i, u in enumerate(top, 1):
+        text += f"{i}. {get_user_mention(u.user_id, u.username, u.first_name)} — 🍵 {u.tea_count}\n"
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton(
+        "🏠 Топ чата",
+        callback_data=f"chat_top:{call.message.chat.id}"
+    ))
+
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb
+    )
+
+# ================== ОБРАБОТКА ТЕКСТА И РП КОМАНД ==================
+
 @bot.message_handler(func=lambda message: True)
 def handle_text_messages(message):
     db.add_chat(message.chat.id)
-    
+
     user = db.get_or_create_user(
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name
     )
-    
+
     if user.blocked:
         send_blocked_message(message, user)
         return
-    
-    text = message.text.lower()
-    
-    # Обработка админских команд
-    if text.startswith('заблокировать'):
+
+    if not message.text:
+        return
+
+    text = message.text.lower().strip()
+
+    # Админ-команды
+    if text.startswith("заблокировать"):
         handle_block_command(message)
         return
-    elif text.startswith('разблокировать'):
+
+    if text.startswith("разблокировать"):
         handle_unblock_command(message)
         return
-    
-    # Обработка РП команд (только ответом на сообщения)
+
+    # РП команды — только ответом
     if message.reply_to_message:
         handle_rp_command(message)
 
+
 def handle_rp_command(message):
-    text = message.text.lower()
-    
-    # Проверяем является ли отправитель заблокированным
+    text = message.text.lower().strip()
+
     sender = db.get_or_create_user(
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name
     )
-    
+
     if sender.blocked:
         return
-    
-    # Проверяем является ли получатель заблокированным
+
     receiver_user = message.reply_to_message.from_user
     receiver = db.get_or_create_user(
         receiver_user.id,
         receiver_user.username,
         receiver_user.first_name
     )
-    
+
     if receiver.blocked:
         return
-    
+
     sender_mention = get_user_mention(
+        sender.user_id,
+        sender.username,
+        sender.first_name
+    )
+
+    receiver_mention = get_user_mention(
+        receiver.user_id,
+        receiver.username,
+        receiver.first_name
+    )
+
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(types.InlineKeyboardButton("🍵 Наш чат", url=CHAT_LINK))
+
+    if text == "попить чай":
+        response = (
+            f"🍵 {sender_mention} и {receiver_mention}\n"
+            f"☕ Мирно попили чай вместе"
+        )
+        bot.send_message(message.chat.id, response, reply_markup=keyboard)
+
+    elif text == "налить чай":
+        response = (
+            f"🫖 {sender_mention}\n"
+            f"➡️ Налил горячий чай для {receiver_mention}"
+        )
+        bot.send_message(message.chat.id, response, reply_markup=keyboard)
+
+    elif text == "украсть чай":
+        response = (
+            f"😈 {sender_mention}\n"
+            f"🥃 Подло украл чай у {receiver_mention}"
+        )
+        bot.send_message(message.chat.id, response, reply_markup=keyboard)
+
+
+# ================== БЛОКИРОВКА ==================
+
+def handle_block_command(message):
+    if not is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()
+    reason = ""
+    target_id = None
+
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+        reason = " ".join(args[1:])
+
+    else:
+        try:
+            target_id = int(args[1])
+            reason = " ".join(args[2:])
+        except:
+            return
+
+    if target_id not in db.users:
+        try:
+            info = bot.get_chat(target_id)
+            db.get_or_create_user(target_id, info.username, info.first_name)
+        except:
+            bot.send_message(message.chat.id, "❌ Пользователь не найден")
+            return
+
+    user = db.users[target_id]
+    user.blocked = True
+    user.block_reason = reason
+    db.save_data()
+
+    admin_mention = get_user_mention(
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name
     )
-    
-    receiver_mention = get_user_mention(
-        receiver_user.id,
-        receiver_user.username,
-        receiver_user.first_name
+
+    user_mention = get_user_mention(
+        user.user_id,
+        user.username,
+        user.first_name
     )
-    
-    keyboard = types.InlineKeyboardMarkup()
-    keyboard.add(types.InlineKeyboardButton("🍵Наш чат", url=CHAT_LINK))
-    
-    if text == "попить чай":
-        response = f"🍻{sender_mention}, ты выпил чай вместе с {receiver_mention}"
-        bot.send_message(message.chat.id, response, parse_mode='HTML', reply_markup=keyboard)
-    
-    elif text == "налить чай":
-        response = f"🍺{sender_mention}, ты налил чай для {receiver_mention}"
-        bot.send_message(message.chat.id, response, parse_mode='HTML', reply_markup=keyboard)
-    
-    elif text == "украсть чай":
-        response = f"🥃{sender_mention}, ты украл любимый чай у {receiver_mention}"
-        bot.send_message(message.chat.id, response, parse_mode='HTML', reply_markup=keyboard)
 
-# Обработка команды блокировки
-def handle_block_command(message):
-    if not is_admin(message.from_user.id):
-        return
-    
-    args = message.text.split()
-    
-    if len(args) < 2:
-        return
-    
-    target_id = None
-    reason = ""
-    
-    # Проверяем если команда отправлена ответом на сообщение
-    if message.reply_to_message:
-        target_id = message.reply_to_message.from_user.id
-        reason = ' '.join(args[1:])
-    else:
-        # Пытаемся получить ID из текста
-        try:
-            target_id = int(args[1])
-            reason = ' '.join(args[2:]) if len(args) > 2 else ""
-        except ValueError:
-            return
-    
-    if target_id:
-        # Создаем пользователя если его еще нет
-        if target_id not in db.users:
-            # Получаем информацию о пользователе
-            try:
-                user_info = bot.get_chat(target_id)
-                db.get_or_create_user(
-                    target_id,
-                    user_info.username,
-                    user_info.first_name
-                )
-            except:
-                bot.send_message(message.chat.id, "❌ Не удалось найти пользователя")
-                return
-        
-        user = db.users[target_id]
-        user.blocked = True
-        user.block_reason = reason
-        db.save_data()
-        
-        admin_mention = get_user_mention(
-            message.from_user.id,
-            message.from_user.username,
-            message.from_user.first_name
-        )
-        
-        user_mention = get_user_mention(
-            user.user_id,
-            user.username,
-            user.first_name
-        )
-        
-        response = f"{admin_mention}, вы заблокировали пользователя {user_mention} по причине: {reason}"
-        bot.send_message(message.chat.id, response, parse_mode='HTML')
+    bot.send_message(
+        message.chat.id,
+        f"🚫 {admin_mention}\n"
+        f"Пользователь {user_mention} заблокирован\n"
+        f"📄 Причина: {reason or 'не указана'}"
+    )
 
-# Обработка команды разблокировки
+
+# ================== РАЗБЛОКИРОВКА ==================
+
 def handle_unblock_command(message):
     if not is_admin(message.from_user.id):
         return
-    
+
     args = message.text.split()
-    
-    if len(args) < 2:
-        return
-    
     target_id = None
-    
-    # Проверяем если команда отправлена ответом на сообщение
+
     if message.reply_to_message:
         target_id = message.reply_to_message.from_user.id
     else:
-        # Пытаемся получить ID из текста
         try:
             target_id = int(args[1])
-        except ValueError:
+        except:
             return
-    
-    if target_id and target_id in db.users:
-        user = db.users[target_id]
-        user.blocked = False
-        user.block_reason = ""
-        db.save_data()
-        
-        admin_mention = get_user_mention(
-            message.from_user.id,
-            message.from_user.username,
-            message.from_user.first_name
-        )
-        
-        user_mention = get_user_mention(
-            user.user_id,
-            user.username,
-            user.first_name
-        )
-        
-        response = f"{admin_mention}, вы разблокировали пользователя {user_mention}"
-        bot.send_message(message.chat.id, response, parse_mode='HTML')
+
+    if target_id not in db.users:
+        return
+
+    user = db.users[target_id]
+    user.blocked = False
+    user.block_reason = ""
+    db.save_data()
+
+    admin_mention = get_user_mention(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.first_name
+    )
+
+    user_mention = get_user_mention(
+        user.user_id,
+        user.username,
+        user.first_name
+    )
+
+    bot.send_message(
+        message.chat.id,
+        f"✅ {admin_mention}\n"
+        f"Пользователь {user_mention} разблокирован"
+    )
 
 # Админские команды
 @bot.message_handler(commands=['admin'])
