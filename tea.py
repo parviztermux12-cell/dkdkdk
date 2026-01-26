@@ -318,74 +318,7 @@ def reset_daily_weekly_counts(stats: UserStats):
         stats.weekly_count = 0
         stats.last_weekly_reset = year_week
         
-        # ================== GENERATE IMAGE (Nano-Banano) ==================
-
-from google import genai
-from PIL import Image
-
-client = genai.Client()
-
-generation_wait = {}  # user_id: True
-
-
-@bot.message_handler(func=lambda message: generation_wait.get(message.from_user.id, False))
-def handle_generation_text(message):
-    user_id = message.from_user.id
-    generation_wait.pop(user_id, None)
-
-    bot.reply_to(
-        message,
-        "❗ <b>Начинаю генерацию...</b>\n"
-        "⏳ Ждать осталось 5–30 секунд",
-        parse_mode="HTML"
-    )
-
-    try:
-        contents = []
-
-        # --- если пришло фото ---
-        if message.photo:
-            file_info = bot.get_file(message.photo[-1].file_id)
-            downloaded = bot.download_file(file_info.file_path)
-
-            with open("input.png", "wb") as f:
-                f.write(downloaded)
-
-            image = Image.open("input.png")
-
-            prompt = message.caption or "Измени изображение аккуратно, реалистично"
-
-            contents = [prompt, image]
-
-        # --- если только текст ---
-        else:
-            prompt = message.text
-            contents = [prompt]
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-image",
-            contents=contents,
-        )
-
-        for part in response.parts:
-            if part.inline_data:
-                image = part.as_image()
-                image.save("generated_image.png")
-
-        bot.send_photo(
-            message.chat.id,
-            photo=open("generated_image.png", "rb"),
-            reply_to_message_id=message.message_id,
-            caption="✅ <b>Итоговый результат</b>",
-            parse_mode="HTML"
-        )
-
-    except Exception as e:
-        bot.reply_to(
-            message,
-            f"❌ Ошибка генерации:\n<code>{e}</code>",
-            parse_mode="HTML"
-        )
+       
 
 # ================== ОСНОВНЫЕ КОМАНДЫ ==================
 
